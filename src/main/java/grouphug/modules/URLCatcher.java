@@ -53,23 +53,26 @@ public class URLCatcher implements GrouphugModule
      */
     public void specialTrigger(String channel, String sender, String login, String hostname, String message)
     {
-       /*if (message.startsWith(HTTP_URI) || message.startsWith(HTTPS_URI))
-        {
-            String title = getHTMLTitle(message);
-            if (title != null)
-                bot.sendMessage("URLCatcher: " + title, false);
-        }*/
         ArrayList<String> urls = findAllUrls(message);
-        for (String url : urls)
+        for (final String url : urls)
         {
-            String title = getHTMLTitle(url);
-            if (title != null) {
-                if (title.length() > TITLE_MAX_LENGTH) {
-                    title = title.substring(0, TITLE_MAX_LENGTH);
-                    title = title.concat(" (...)");
+            // look up urls in separate threads, to avoid blocking for other requests
+            new Thread()
+            {
+                @Override
+                public void run()
+                {
+                    String title = getHTMLTitle(url);
+                    if (title != null) {
+                        if (title.length() > TITLE_MAX_LENGTH)
+                        {
+                            title = title.substring(0, TITLE_MAX_LENGTH);
+                            title = title.concat(" (...)");
+                        }
+                        Grouphug.getInstance().sendMessage("Title: " + Grouphug.entitiesToChars(title), false);
+                    }
                 }
-                Grouphug.getInstance().sendMessage("Title: " + Grouphug.entitiesToChars(title) /*+ " :: " + url*/, false);
-            }
+            }.start();
         }
     }
 
