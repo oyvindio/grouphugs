@@ -46,14 +46,13 @@ public class ModuleHandler {
         new Seen(this);
         new Slang(this);
         new Tracking(this);
-        new Translate(this);
         new Upload(this);
         new URLCatcher(this);
         new WordCount(this);
 
         System.out.println();
-        System.out.println(helpers.size() + " help responses loaded");
-        System.out.println(triggerListeners.size() + " modules are listening for triggers");
+        System.out.println(helpers.size() + " help responses registered");
+        System.out.println(triggerListeners.size() + " triggers registered");
         System.out.println(messageListeners.size() + " modules are listening for anything");
     }
 
@@ -103,7 +102,8 @@ public class ModuleHandler {
         for(TriggerListener listener : triggerListeners) {
             if(listener.trigger(message)) {
                 // we trim the trigger and any following whitespace from the message
-                listener.getListener().onTrigger(channel, sender, login, hostname, message.substring(listener.getTrigger().length()).trim());
+                listener.getListener().onTrigger(channel, sender, login, hostname,
+                        message.substring(listener.getTrigger().length()).trim(), listener.getTrigger());
             }
         }
     }

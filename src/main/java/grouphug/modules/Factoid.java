@@ -2,7 +2,9 @@ package grouphug.modules;
 
 import grouphug.Grouphug;
 import grouphug.ModuleHandler;
+import grouphug.exceptions.SQLUnavailableException;
 import grouphug.listeners.MessageListener;
+import grouphug.listeners.TriggerListener;
 import grouphug.util.SQLHandler;
 
 import java.sql.SQLException;
@@ -17,23 +19,18 @@ import java.util.Random;
  * to the channel, we maintain a local list in memory, and just keep the SQL db synchronized, so
  * that on startup we can fetch all the factoids back.
  */
-public class Factoid implements MessageListener {
-
-    // TODO - dynamic reply, with username, more?
-    // TODO - more details of factiod ? time ?
+public class Factoid implements MessageListener, TriggerListener {
 
     private ArrayList<FactoidItem> factoids = new ArrayList<FactoidItem>();
 
     private static final String TRIGGER_HELP = "factoid";
 
-    private static final String TRIGGER_MAIN = "!factoid";
-    private static final String TRIGGER_RANDOM = "random";
+    private static final String TRIGGER_MAIN = "factoid";
+    private static final String TRIGGER_RANDOM = "randomfactoid";
+    private static final String TRIGGER_FOR = "trigger";
 
-    private static final String TRIGGER_MAIN_ADD = "<on> ";
-    private static final String TRIGGER_MAIN_DEL = "<forget> ";
-
-    private static final String TRIGGER_SHORT_ADD = "!on ";
-    private static final String TRIGGER_SHORT_DEL = "!forget ";
+    private static final String TRIGGER_ADD = "on";
+    private static final String TRIGGER_DEL = "forget";
 
     private static final String SEPARATOR_MESSAGE = " <say> ";
     private static final String SEPARATOR_ACTION = " <do> ";
@@ -41,8 +38,6 @@ public class Factoid implements MessageListener {
     private static final String FACTOID_TABLE = "factoid";
 
     private static Random random = new Random(System.nanoTime());
-
-    private long lastAddedTime; // HACK to avoid specialTrigger() being called on the same line
 
     private SQLHandler sqlHandler;
 
@@ -55,181 +50,157 @@ public class Factoid implements MessageListener {
                 boolean message = row[0].equals("message");
                 factoids.add(new FactoidItem(message, (String)row[1], (String)row[2], (String)row[3]));
             }
+            moduleHandler.addTriggerListener(TRIGGER_MAIN, this);
+            moduleHandler.addTriggerListener(TRIGGER_ADD, this);
+            moduleHandler.addTriggerListener(TRIGGER_DEL, this);
+            moduleHandler.addTriggerListener(TRIGGER_RANDOM, this);
+            moduleHandler.addTriggerListener(TRIGGER_FOR, this);
             moduleHandler.addMessageListener(this);
             moduleHandler.registerHelp(TRIGGER_HELP, "Factoid: Make me say or do \"reply\" when someone says \"trigger\".\n" +
-                   "  "+Grouphug.MAIN_TRIGGER+TRIGGER_SHORT_ADD + "trigger <say> reply\n" +
-                   "  "+Grouphug.MAIN_TRIGGER+TRIGGER_SHORT_ADD + "trigger <do> reply\n" +
-                   "  "+Grouphug.MAIN_TRIGGER+TRIGGER_SHORT_DEL + "trigger\n" +
-                   "Other triggers, to view info, or get a random factoid:\n" +
-                   //"  "+Grouphug.MAIN_TRIGGER+TRIGGER_MAIN + " trigger\n" +
-                   "  "+Grouphug.MAIN_TRIGGER+TRIGGER_MAIN + " " + TRIGGER_RANDOM + "\n" +
-                   " - The string \"$sender\" will be replaced with the nick of the one triggering the factoid.\n" +
-                   " - A star (*) can be any string of characters.\n" +
-                   " - Regex can be used, but 1) remember that * is replaced with .* and 2) this will probably change very soon.");
-
-        } catch(ClassNotFoundException ex) {
-            System.err.println("Factoid startup: SQL unavailable!");
-            // TODO should disable this module at this point
+                    "  "+Grouphug.MAIN_TRIGGER+TRIGGER_ADD +    " trigger <say> reply\n" +
+                    "  "+Grouphug.MAIN_TRIGGER+TRIGGER_ADD +    " trigger <do> something\n" +
+                    "  "+Grouphug.MAIN_TRIGGER+TRIGGER_DEL +    " trigger\n" +
+                    "  "+Grouphug.MAIN_TRIGGER+TRIGGER_MAIN +   " trigger      - show information about a factoid\n" +
+                    "  "+Grouphug.MAIN_TRIGGER+TRIGGER_RANDOM + "        - trigger a random factoid\n" +
+                    "  "+Grouphug.MAIN_TRIGGER+TRIGGER_FOR + " <expression> - show what factoid, if any, that is " +
+                    "triggered by that expression\n" +
+                    " - The string \"$sender\" will be replaced with the nick of the one triggering the factoid.\n" +
+                    " - A star (*) can be any string of characters.\n" +
+                    " - Regex can be used, but remember that * is replaced with .*");
+            System.out.println("Factoid module loaded.");
+        } catch(SQLUnavailableException ex) {
+            System.err.println("Factoid startup: SQL is unavailable!");
         } catch (SQLException e) {
             System.err.println("Factoid startup: SQL Exception: "+e);
         }
     }
 
-    public void onMessage(String channel, String sender, String login, String hostname, String message) {
+    public void onTrigger(String channel, String sender, String login, String hostname, String message, String trigger) {
 
-        // If trying to ADD a NEW factoid (with the main trigger !factoid <on> or the shorttrigger !on)
-        if(message.startsWith(TRIGGER_MAIN + TRIGGER_MAIN_ADD) || message.startsWith(TRIGGER_SHORT_ADD)){
+        if(trigger.equals(TRIGGER_ADD)) {
+            // Trying to add a new factoid
 
-            // First parse the line to find the trigger, reply, and if it's a message or action
-            // Do this based on what kind of trigger that was used
-            String line;
-            if(message.startsWith(TRIGGER_MAIN + TRIGGER_MAIN_ADD))
-                line = message.substring(TRIGGER_MAIN.length()+TRIGGER_MAIN_ADD.length());
-            else
-                line = message.substring(TRIGGER_SHORT_ADD.length());
+            String type;
+            String factoidTrigger, reply;
 
-            boolean replyMessage;
-            String trigger, reply;
-
-            if(line.contains(SEPARATOR_MESSAGE)) {
-                replyMessage = true;
-                trigger = line.substring(0, line.indexOf(SEPARATOR_MESSAGE));
-                reply = line.substring(line.indexOf(SEPARATOR_MESSAGE) + SEPARATOR_MESSAGE.length());
-            } else if(line.contains(SEPARATOR_ACTION)) {
-                replyMessage = false;
-                trigger = line.substring(0, line.indexOf(SEPARATOR_ACTION));
-                reply = line.substring(line.indexOf(SEPARATOR_ACTION) + SEPARATOR_ACTION.length());
+            if(message.contains(SEPARATOR_MESSAGE)) {
+                type = "message";
+                factoidTrigger = message.substring(0, message.indexOf(SEPARATOR_MESSAGE));
+                reply = message.substring(message.indexOf(SEPARATOR_MESSAGE) + SEPARATOR_MESSAGE.length());
+            } else if(message.contains(SEPARATOR_ACTION)) {
+                type = "action";
+                factoidTrigger = message.substring(0, message.indexOf(SEPARATOR_ACTION));
+                reply = message.substring(message.indexOf(SEPARATOR_ACTION) + SEPARATOR_ACTION.length());
             } else {
                 // If it's neither a message nor an action
-                Grouphug.getInstance().sendMessage("What? Don't give me that nonsense, "+sender+".", false);
+                Grouphug.getInstance().sendMessage("What? Don't give me that nonsense, "+sender+".");
                 return;
             }
 
-            // add() returns true if the factoid is added, or false if the trigger is already taken
-            if(add(replyMessage, trigger, reply, sender)) {
-                Grouphug.getInstance().sendMessage("OK, "+sender+".", false);
-
-                lastAddedTime = System.nanoTime(); // HACK to avoid specialTrigger() being called on the same line
-            } else {
-                Grouphug.getInstance().sendMessage("But, "+sender+", "+trigger+".", false);
+            if(find(trigger, false).size() != 0) {
+                Grouphug.getInstance().sendMessage("But, "+sender+", "+factoidTrigger+".");
+                return;
             }
 
-        }
-        // Not trying to ADD a new factoid, so check if we're trying to REMOVE one
-        else if(message.startsWith(TRIGGER_MAIN + TRIGGER_MAIN_DEL) || message.startsWith(TRIGGER_SHORT_DEL)) {
-
-            // Parse the line, based on what kind of trigger that was used
-            String trigger;
-            if(message.startsWith(TRIGGER_MAIN + TRIGGER_MAIN_DEL))
-                trigger = message.substring(TRIGGER_MAIN.length()+ TRIGGER_MAIN_DEL.length());
-            else
-                trigger = message.substring(TRIGGER_SHORT_DEL.length());
-
-            // and try to remove it - del() returns true if it's removed, false if there is no such trigger
-            if(del(trigger)) {
-                Grouphug.getInstance().sendMessage("I no longer know of this "+trigger+" that you speak of.", false);
-            } else {
-                Grouphug.getInstance().sendMessage(sender+", I can't remember "+trigger+" in the first place.", false);
+            // First add the new item to the SQL db
+            try {
+                sqlHandler.insert("INSERT INTO " + FACTOID_TABLE + " (`type`, `trigger`, `reply`, `author`) VALUES ('"+type+"', '"+factoidTrigger+"', '"+reply+"', '"+sender+"');");
+            } catch(SQLException e) {
+                System.err.println("Factoid insertion: SQL Exception: "+e);
             }
 
-        }
-        // Ok, neither ADDing nor REMOVING, so check if we're just trying to see data about a factoid
-        else if(message.startsWith(TRIGGER_MAIN)) {
-            FactoidItem factoid;
-            String trigger = message.substring(TRIGGER_MAIN.length());
-            if((factoid = find(trigger, false)) != null) {
-                Grouphug.getInstance().sendMessage("Factoid: [ trigger = "+factoid.getTrigger()+" ] [ reply = "+factoid.getReply()+" ] [ author = "+factoid.getAuthor()+" ]", false);
+            // Then add it to memory
+            factoids.add(new FactoidItem(type.equals("message"), factoidTrigger, reply, sender));
+            Grouphug.getInstance().sendMessage("OK, "+sender+".");
+        } else if(trigger.equals(TRIGGER_DEL)) {
+            // Trying to remove a factoid
+            ArrayList<FactoidItem> factoids = find(message, false);
+            if(factoids.size() == 0) {
+                Grouphug.getInstance().sendMessage(sender+", I can't remember "+ message +" in the first place.");
+            } else if(factoids.size() != 1) {
+                Grouphug.getInstance().sendMessage("I actually have " + factoids.size() + " such factoids, how did that happen? " +
+                        "Please remove them manually and fix this bug.");
+                System.err.println("More than one factoid exists with '"+message+"' as trigger:");
+                for(FactoidItem factoid : factoids) {
+                    System.err.println(factoid.toString());
+                }
             } else {
-                Grouphug.getInstance().sendMessage(sender+", I do not know of this "+trigger+" that you speak of.", false);
-            }
+                // First remove it from the SQL db
+                try {
+                    if(sqlHandler.delete("DELETE FROM " + FACTOID_TABLE + "  WHERE `trigger` = '"+message+"';") == 0) {
+                        System.err.println("Factoid deletion warning: Item was found in local arraylist, but not in SQL DB!");
+                        Grouphug.getInstance().sendMessage("OMG inconsistency; I have the factoid in memory but not in the SQL db.");
+                        return;
+                    }
+                } catch(SQLException e) {
+                    Grouphug.getInstance().sendMessage("You should know that I caught an SQL exception.");
+                    System.err.println("Factoid deletion: SQL Exception!");
+                    e.printStackTrace();
+                }
 
-        }
-        // The last triggered alternative would be the trigger for getting a random factoid
-        else if(message.startsWith(TRIGGER_RANDOM)) {
+                // Then remove it from memory
+                this.factoids.remove(factoids.get(0));
+                Grouphug.getInstance().sendMessage("I no longer know of this "+ message +" that you speak of.");
+            }
+        } else if(trigger.equals(TRIGGER_MAIN)) {
+            // Trying to view data about a factoid
+            ArrayList<FactoidItem> factoids = find(message, false);
+            if(factoids.size() == 0) {
+                Grouphug.getInstance().sendMessage(sender+", I do not know of this "+message+" that you speak of.");
+            } else {
+                for(FactoidItem factoid : factoids) {
+                    Grouphug.getInstance().sendMessage(factoid.toString());
+                }
+            }
+        } else if(trigger.equals(TRIGGER_RANDOM)) {
             factoids.get(random.nextInt(factoids.size())).send(sender);
+        } else if(trigger.equals(TRIGGER_FOR)) {
+            ArrayList<FactoidItem> factoids = find(message, true);
+            if(factoids.size() == 0) {
+                Grouphug.getInstance().sendMessage("Sorry, that expression doesn't ring any bell.");
+            } else {
+                for(FactoidItem factoid : factoids) {
+                    Grouphug.getInstance().sendMessage(factoid.toString());
+                }
+            }
+        }
+    }
+
+    public void onMessage(String channel, String sender, String login, String hostname, String message) {
+        // avoid outputting when the trigger is being added, removed or searched for
+        if(message.startsWith(Grouphug.MAIN_TRIGGER + TRIGGER_MAIN) ||
+                message.startsWith(Grouphug.MAIN_TRIGGER + TRIGGER_ADD) ||
+                message.startsWith(Grouphug.MAIN_TRIGGER + TRIGGER_DEL) ||
+                message.startsWith(Grouphug.MAIN_TRIGGER + TRIGGER_FOR)) {
+            return;
         }
 
-        if ((System.nanoTime() - lastAddedTime) < (2 * Math.pow(10.0,9.0))) {
-            return; // HACK to avoid specialTrigger being called on the same line used to add the trigger in the first place
-        }
-
-        FactoidItem factoid;
-        if((factoid = find(message, true)) != null) {
+        ArrayList<FactoidItem> factoids = find(message, true);
+        for(FactoidItem factoid : factoids) {
             factoid.send(sender);
         }
     }
 
     /**
-     * Attempts to add a new factoid.
-     * @param message true if we should reply with a message, false if we should reply with an action
-     * @param trigger The trigger upon which we will react
-     * @param reply The reply corresponding to the trigger
-     * @param author The nick of the person adding the factoid
-     * @return true if the factoid was successfully added, or false if the trigger already exists
-     */
-    private boolean add(boolean message, String trigger, String reply, String author) {
-
-        if(find(trigger, false) != null) {
-            return false;
-        }
-
-        // First add the new item to the SQL db
-        try {
-            sqlHandler.insert("INSERT INTO " + FACTOID_TABLE + " (`type`, `trigger`, `reply`, `author`) VALUES ('"+(message ? "message" : "action")+"', '"+trigger+"', '"+reply+"', '"+author+"');");
-        } catch(SQLException e) {
-            System.err.println("Factoid insertion: SQL Exception: "+e);
-        }
-
-        // Then add it to memory
-        factoids.add(new FactoidItem(message, trigger, reply, author));
-        return true;
-    }
-
-    /**
-     * Attempts to delete an existing factoid specified by trigger
-     * @param trigger The trigger string of the factoid to delete
-     * @return true if the factoid was found and removed, or false if it wasn't found
-     */
-    private boolean del(String trigger) {
-        FactoidItem factoid;
-        if((factoid = find(trigger, false)) != null) {
-            // First remove it from the SQL db
-            try {
-                if(sqlHandler.delete("DELETE FROM " + FACTOID_TABLE + "  WHERE `trigger` = '"+trigger+"';") == 0) {
-                    System.err.println("Factoid deletion warning: Item was found in local arraylist, but not in SQL DB!");
-                    Grouphug.getInstance().sendMessage("OMG inconsistency; I have the factoid in memory but not in the SQL db.", false);
-                    return false;
-
-                }
-            } catch(SQLException e) {
-                System.err.println("Factoid deletion: SQL Exception: "+e);
-            }
-
-            // Then remove it from memory
-            factoids.remove(factoid);
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    /**
-     * Tries to find a factoid in local memory
-     * @param trigger The trigger string of the factoid to search for
+     * Tries to find factoid in local memory
+     * @param expression The expression that might trigger factoids
      * @param regex true if a regex should be used to find the trigger, false if it should be exact search
      * @return The found FactoidItem, or null if no item was found
      */
-    private FactoidItem find(String trigger, boolean regex) {
+    private ArrayList<FactoidItem> find(String expression, boolean regex) {
+        ArrayList<FactoidItem> items = new ArrayList<FactoidItem>();
         for(FactoidItem factoid : factoids) {
             if(regex) {
-                if(factoid.trigger(trigger))
-                    return factoid;
+                if(factoid.trigger(expression)) {
+                    items.add(factoid);
+                }
             } else {
-                if(factoid.getTrigger().equals(trigger))
-                    return factoid;
+                if(factoid.getTrigger().equals(expression)) {
+                    items.add(factoid);
+                }
             }
         }
-        return null;
+        return items;
     }
 
     private static class FactoidItem {
@@ -277,6 +248,12 @@ public class Factoid implements MessageListener {
                 // TODO - action evades spam, and all the local sendMessage routines
                 Grouphug.getInstance().sendAction(Grouphug.CHANNEL, getReply().replace("$sender", sender));
             }
+        }
+
+        @Override
+        public String toString() {
+            return "Factoid: [ trigger = "+getTrigger()+" ] [ reply = "+getReply()+" ] [ type = "+
+                    (isMessage() ? "message" : "action")+" ]  [ author = "+getAuthor()+" ]";
         }
     }
 }
